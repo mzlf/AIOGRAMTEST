@@ -24,7 +24,7 @@ logging.basicConfig(level=logging.INFO)
 async def get_dtek_full_data():
     async with browser_lock:
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=False, args=["--no-sandbox"])
+            browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
             context = await browser.new_context(user_agent="Mozilla/5.0")
             page = await context.new_page()
             await page.route("**/*.{png,jpg,jpeg,svg,woff,woff2}", lambda route: route.abort())
