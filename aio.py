@@ -260,8 +260,7 @@ def get_kb(uid):
     return types.ReplyKeyboardMarkup(
         keyboard=[
             [types.KeyboardButton(text="Показать график 💡")],
-            [types.KeyboardButton(text="Когда выключат/включат? ⏳")], 
-            [types.KeyboardButton(text="Вкл/Выкл мониторинг 📡")]
+            [types.KeyboardButton(text="Вкл/Выкл мониторинг 📡")],
         ], resize_keyboard=True
     )
 
