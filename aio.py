@@ -1,6 +1,8 @@
 import asyncio
 import logging
 import json
+from datetime import datetime, timedelta
+import pytz
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -8,7 +10,7 @@ from upstash_redis import Redis
 from playwright.async_api import async_playwright
 
 # --- КОНФИГ ---
-TOKEN = "8313489502:AAF6uAPfnqtl__ls1okbIDVBC5t8rYs24oU"
+TOKEN = "8766449770:AAENhr67_jjlh7CKFN_uj-SRI83Bu8ZP5xU"
 REDIS_URL = "https://driven-fox-52037.upstash.io"
 REDIS_TOKEN = "ActFAAIncDI4YzQwMjBhNzkxNzY0YmYzYjFhN2FmZGJkODg0NmFiMHAyNTIwMzc"
 
@@ -34,19 +36,21 @@ analysis_script = """
 () => {
     const activeTab = document.querySelector("#discon-fact .dates .date.active");
     const dateId = activeTab ? activeTab.getAttribute("rel") : null;
+    const dateTextElem = activeTab ? activeTab.querySelector("div:nth-child(2)") : null;
+    const dateText = dateTextElem ? dateTextElem.innerText.trim() : "Графік";
 
     const updateTimeElem = document.querySelector("#discon-fact .discon-fact-info-text");
     const updateTime = updateTimeElem ? updateTimeElem.innerText.trim() : "---";
 
     const row = document.querySelector("#discon-fact .discon-fact-table.active table tbody tr");
-    if (!row) return { dateId, schedule: "Графік не знайдено", updateTime };
+    if (!row) return { dateId, dateText, schedule: "Графік не знайдено", raw_statuses: [], updateTime };
 
     const cells = Array.from(row.querySelectorAll("td")).slice(1, 25);
-
-    let statuses = [];
+    let raw_statuses = []; // Масив із 48 елементів
     cells.forEach(c => {
-        statuses.push((c.classList.contains('cell-scheduled') || c.classList.contains('cell-first-half')) ? "🔴" : "🟢");
-        statuses.push((c.classList.contains('cell-scheduled') || c.classList.contains('cell-second-half')) ? "🔴" : "🟢");
+        let s1 = (c.classList.contains('cell-scheduled') || c.classList.contains('cell-first-half')) ? "🔴" : "🟢";
+        let s2 = (c.classList.contains('cell-scheduled') || c.classList.contains('cell-second-half')) ? "🔴" : "🟢";
+        raw_statuses.push(s1, s2);
     });
 
     let intervals = [];
@@ -55,18 +59,17 @@ analysis_script = """
         return String(Math.floor(m/60)).padStart(2,'0') + ":" + String(m%60).padStart(2,'0');
     };
 
-    let cur = statuses[0], start = 0;
+    let cur = raw_statuses[0], start = 0;
     for (let i = 1; i <= 48; i++) {
-        if (i === 48 || statuses[i] !== cur) {
+        if (i === 48 || raw_statuses[i] !== cur) {
             intervals.push(cur + " <b>" + fmt(start) + " — " + (i === 48 ? "00:00" : fmt(i)) + "</b>");
-            if(i < 48) { cur = statuses[i]; start = i; }
+            if(i < 48) { cur = raw_statuses[i]; start = i; }
         }
     }
 
-    return { dateId, schedule: intervals.join("\\n"), updateTime };
+    return { dateId, dateText, schedule: intervals.join("\\n"), raw_statuses, updateTime };
 }
 """
-
 # =============================
 # 🌐 Логика браузера и Самовосстановление
 # =============================
@@ -207,20 +210,64 @@ async def monitoring_task():
                 except Exception as e:
                     logging.error(f"Ошибка отправки {uid}: {e}")
 
+def calculate_time_left(raw_statuses):
+    if not raw_statuses or len(raw_statuses) < 48:
+        return "Нету данных для рассчета."
+
+    tz = pytz.timezone('Europe/Kiev')
+    now = datetime.now(tz)
+    
+    # Скільки всього хвилин пройшло з початку дня
+    minutes_from_start = now.hour * 60 + now.minute
+    # Поточний індекс у масиві (0-47)
+    current_idx = minutes_from_start // 30
+    
+    if current_idx >= 48:
+        return "Сегодняшний график закончился."
+
+    current_state = raw_statuses[current_idx]
+    
+    # Шукаємо, коли статус зміниться
+    change_idx = -1
+    for i in range(current_idx + 1, 48):
+        if raw_statuses[i] != current_state:
+            change_idx = i
+            break
+    
+    if change_idx == -1:
+        return f"Сейчас {current_state}. До конца дня свет будет."
+
+    # Хвилин до зміни: (індекс зміни * 30) - поточні хвилини
+    diff_minutes = (change_idx * 30) - minutes_from_start
+    
+    hours = diff_minutes // 60
+    minutes = diff_minutes % 60
+    
+    action = "включат" if current_state == "🔴" else "выключат"
+    time_str = f"<b>{hours} час. {minutes} м.</b>" if hours > 0 else f"<b>{minutes} м.</b>"
+    
+    return f"Сейчас: {current_state}\nПриблизительно через {time_str} свет {action}."
+async def get_time_info(m: types.Message):
+    # Беремо актуальні дані (через кеш або прямий парсинг)
+    schedules = await get_all_schedules()
+    if not schedules:
+        await m.answer("Не удалось получить данные с сайта.")
+        return
 # =============================
 # 🤖 Интерфейс Бота
 # =============================
 def get_kb(uid):
     return types.ReplyKeyboardMarkup(
         keyboard=[
-            [types.KeyboardButton(text="Показати графік 💡")],
-            [types.KeyboardButton(text="Вкл/Викл моніторинг 📡")]
+            [types.KeyboardButton(text="Показать график 💡")],
+            [types.KeyboardButton(text="Когда выключат/включат? ⏳")], 
+            [types.KeyboardButton(text="Вкл/Выкл мониторинг 📡")]
         ], resize_keyboard=True
     )
 
 @dp.message(Command("start"))
 async def start_cmd(m: types.Message):
-    await m.answer("Бот активний. Натисніть кнопку нижче для перевірки.", reply_markup=get_kb(m.from_user.id))
+    await m.answer("Бот работает. Нажмите кнопку ниже для проверки.", reply_markup=get_kb(m.from_user.id))
 
 @dp.message(F.text.contains("мониторинг"))
 async def toggle(m: types.Message):
@@ -233,28 +280,30 @@ async def toggle(m: types.Message):
         redis.sadd("monitoring_users", uid)
         await m.answer("Мониторинг включен.")
 
-@dp.message(F.text.contains("график") | F.text.contains("Показати"))
+@dp.message(F.text.contains("график") | F.text.contains("Показать"))
 async def manual(m: types.Message):
     msg = await m.answer("🔍 Проверяю сайт ДТЭК...")
     schedules = await get_all_schedules()
+    today_rel = sorted(schedules.keys())[0]
+    data = schedules[today_rel]
 
     if not schedules:
-        await msg.edit_text("❌ Не вдалося отримати графік. Спробуйте пізніше.")
+        await msg.edit_text("❌ Не удалось получить график.")
         return
-
+    
+    ans = calculate_time_left(data.get('raw_statuses', []))
     full_text = ""
+    # Сортируем по rel, чтобы сегодня было первым
     for rel in sorted(schedules.keys()):
-        data = schedules[rel]
-        try:
-            dt = datetime.fromtimestamp(int(rel))
-            date_str = dt.strftime("%d.%m.%Y")
-        except: date_str = "Графік"
-        full_text += f"📅 <b>{date_str}</b>\n{data['schedule']}\n\n"
+        d = schedules[rel]
+        # Используем d['dateText'], который мы вытянули прямо из вкладки сайта
+        full_text += f"⚡ <b>{d['dateText']}</b>\n{d['schedule']}\n\n"
 
-    full_text += f"🕒 <i>Дані на: {list(schedules.values())[0]['updateTime']}</i>"
+    full_text += f"🕒 <i> {list(schedules.values())[0]['updateTime']}</i>\n\n"
+    full_text += f"{ans}\n\n"
     await msg.edit_text(full_text, parse_mode="HTML")
 
-async def main():
+async def main():   
     await start_browser()
     asyncio.create_task(monitoring_task())
     await dp.start_polling(bot)
