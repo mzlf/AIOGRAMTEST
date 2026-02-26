@@ -74,17 +74,27 @@ analysis_script = """
 # =============================
 async def setup_page(ctx):
     p = await ctx.new_page()
-    # Блокируем лишнее для скорости
-    await p.route("**/*", lambda route: route.abort() 
+
+    # Блокируем ВСЁ кроме document + xhr + fetch
+    await p.route("**/*", lambda route: route.abort()
         if route.request.resource_type in ["image", "media", "font", "stylesheet", "other"] 
         else route.continue_()
     )
+
+    # Убираем анимации (ускоряет автокомплит)
+    await p.add_init_script("""
+        const style = document.createElement('style');
+        style.innerHTML = `* { transition: none !important; animation: none !important; }`;
+        document.head.appendChild(style);
+    """)
+
     return p
 
 async def start_browser():
     global playwright, browser, page_monitor, page_user
     playwright = await async_playwright().start()
-    browser = await playwright.chromium.launch(headless=True, args=["--no-sandbox"])
+    browser = await playwright.chromium.launch(headless=True,args=["--no-sandbox","--disable-dev-shm-usage","--disable-blink-features=AutomationControlled"])
+
     context = await browser.new_context(user_agent="Mozilla/5.0")
     
     page_monitor = await setup_page(context)
@@ -233,7 +243,7 @@ async def monitoring_task():
 
         for uid in users:
             uid = uid.decode() if isinstance(uid, bytes) else uid
-            changed = []
+            changed = []    
             for rel, data in schedules.items():
                 cache_key = f"sched:{uid}:{rel}"
                 cached = redis.get(cache_key)
@@ -242,10 +252,7 @@ async def monitoring_task():
                 redis.set(cache_key, data["schedule"], ex=172800)
 
             if changed:
-                today_rel = sorted(schedules.keys())[0]
-                data = schedules[today_rel]
-                ans = calculate_time_left(data.get('raw_statuses', []))
-
+                ans = calculate_time_left(schedules)
                 msg = "🔔 <b>ГРАФИК ИЗМЕНИЛСЯ!</b>\n\n"
                 for rel in changed:
                     dt = datetime.fromtimestamp(int(rel))
@@ -268,8 +275,7 @@ async def manual(m: types.Message):
         return
 
     today_rel = sorted(schedules.keys())[0]
-    ans = calculate_time_left(schedules[today_rel].get('raw_statuses', []))
-    
+    ans = calculate_time_left(schedules)    
     full_text = ""
     for rel in sorted(schedules.keys()):
         d = schedules[rel]
