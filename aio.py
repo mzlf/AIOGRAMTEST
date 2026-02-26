@@ -78,12 +78,21 @@ analysis_script = """
 # =============================
 async def start_browser():
     global playwright, browser, context, page
+
     playwright = await async_playwright().start()
     browser = await playwright.chromium.launch(headless=True, args=["--no-sandbox"])
     context = await browser.new_context(user_agent="Mozilla/5.0")
     page = await context.new_page()
-    await page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "media", "font", "stylesheet"] else route.continue_())
+
+    await page.route(
+        "**/*",
+        lambda route: route.abort()
+        if route.request.resource_type in ["image", "media", "font", "stylesheet"]
+        else route.continue_()
+    )
+
     await reload_page()
+
 
 async def reload_page():
     global page, last_full_reload
