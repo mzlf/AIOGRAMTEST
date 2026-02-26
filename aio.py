@@ -157,7 +157,6 @@ async def get_all_schedules():
                 tab = tabs.nth(i)
                 try:
                     await tab.click(timeout=5000)
-                    await asyncio.sleep(0.5) 
                 except:
                     await reload_page()
                     return await get_all_schedules()
