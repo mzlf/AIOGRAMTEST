@@ -224,43 +224,66 @@ def calculate_time_left(schedules):
 # =============================
 # 📡 Мониторинг (КД 60 сек)
 # =============================
+# =============================
+# 📡 Мониторинг (КД 60 сек) - ИСПРАВЛЕННЫЙ
+# =============================
 async def monitoring_task():
     global last_monitor_reload
     while True:
-        await asyncio.sleep(10) # Проверяем список юзеров часто
-        users = redis.smembers("monitoring_users")
-        if not users: continue
+        try:
+            await asyncio.sleep(10) # Проверяем список юзеров часто
+            users = redis.smembers("monitoring_users")
+            if not users: continue
 
-        # Проверка КД 60 секунд для обновления страницы мониторинга
-        now = datetime.now()
-        should_reload = False
-        if last_monitor_reload is None or (now - last_monitor_reload) > timedelta(seconds=60):
-            should_reload = True
-            last_monitor_reload = now
+            # Проверка КД 60 секунд для обновления страницы мониторинга
+            now = datetime.now()
+            should_reload = False
+            if last_monitor_reload is None or (now - last_monitor_reload) > timedelta(seconds=60):
+                should_reload = True
+                last_monitor_reload = now
 
-        schedules = await fetch_data(page_monitor, lock_monitor, force=should_reload)
-        if not schedules: continue
+            schedules = await fetch_data(page_monitor, lock_monitor, force=should_reload)
+            if not schedules: continue
 
-        for uid in users:
-            uid = uid.decode() if isinstance(uid, bytes) else uid
-            changed = []    
-            for rel, data in schedules.items():
-                cache_key = f"sched:{uid}:{rel}"
-                cached = redis.get(cache_key)
-                if cached is not None and cached.decode() != data["schedule"]:
-                    changed.append(rel)
-                redis.set(cache_key, data["schedule"], ex=172800)
+            for uid in users:
+                # Безопасно декодируем ID пользователя, если это байты
+                uid = uid.decode() if isinstance(uid, bytes) else uid
+                changed = []    
+                
+                for rel, data in schedules.items():
+                    cache_key = f"sched:{uid}:{rel}"
+                    cached = redis.get(cache_key)
+                    
+                    # ИСПРАВЛЕНИЕ: Убираем обязательный .decode(), проверяем тип
+                    cached_str = cached.decode() if isinstance(cached, bytes) else cached
+                    
+                    if cached_str is not None and cached_str != data["schedule"]:
+                        changed.append(rel)
+                    
+                    redis.set(cache_key, data["schedule"], ex=172800)
 
-            if changed:
-                ans = calculate_time_left(schedules)
-                msg = "🔔 <b>ГРАФИК ИЗМЕНИЛСЯ!</b>\n\n"
-                for rel in changed:
-                    dt = datetime.fromtimestamp(int(rel))
-                    msg += f"📅 <b>{dt.strftime('%d.%m.%Y')}</b>\n{schedules[rel]['schedule']}\n\n"
-                    msg += f"🕒 <i>Обновлено: {list(schedules.values())[0]['updateTime']}</i>n\n{ans}"
-                try: await bot.send_message(int(uid), msg, parse_mode="HTML")
-                except: pass
-
+                if changed:
+                    ans = calculate_time_left(schedules)
+                    msg = "🔔 <b>ГРАФИК ИЗМЕНИЛСЯ!</b>\n\n"
+                    
+                    # Показываем все актуальные дни
+                    for r in sorted(schedules.keys()):
+                        dt = datetime.fromtimestamp(int(r))
+                        msg += f"📅 <b>{dt.strftime('%d.%m.%Y')}</b>\n{schedules[r]['schedule']}\n\n"
+                    
+                    # ИСПРАВЛЕНИЕ: Убрана лишняя буква 'n' перед \n
+                    update_time = list(schedules.values())[0]['updateTime']
+                    msg += f"🕒 <i>Обновлено: {update_time}</i>\n\n{ans}"
+                    
+                    try: 
+                        await bot.send_message(int(uid), msg, parse_mode="HTML")
+                    except Exception as e:
+                        logging.error(f"Ошибка отправки: {e}")
+                        
+        except Exception as e:
+            # Защита от полной остановки мониторинга при любой ошибке
+            logging.error(f"⚠️ Ошибка в цикле мониторинга: {e}")
+            await asyncio.sleep(20)
 # =============================
 # 🤖 Обработка юзера
 # =============================
