@@ -78,55 +78,61 @@ analysis_script = """
 # =============================
 async def start_browser():
     global playwright, browser, context, page
-
     playwright = await async_playwright().start()
     browser = await playwright.chromium.launch(headless=True, args=["--no-sandbox"])
     context = await browser.new_context(user_agent="Mozilla/5.0")
     page = await context.new_page()
 
-    await page.route(
-        "**/*",
-        lambda route: route.abort()
-        if route.request.resource_type in ["image", "media", "font", "stylesheet"]
+    # СВЕРХБЫСТРАЯ ЗАГРУЗКА: Блокируем всё, кроме самого важного
+    await page.route("**/*", lambda route: route.abort() 
+        if route.request.resource_type in ["image", "media", "font", "stylesheet", "other"] 
+        or "google-analytics" in route.request.url 
+        or "facebook" in route.request.url
         else route.continue_()
     )
-
     await reload_page()
-
 
 async def reload_page():
     global page, last_full_reload
-    logging.info("♻️ Выполняется полная перезагрузка страницы и ввод адреса...")
+    logging.info("⚡ Быстрая перезагрузка страницы...")
 
     try:
-        await page.goto("https://www.dtek-krem.com.ua/ua/shutdowns", wait_until="networkidle", timeout=60000)
-        try: await page.click("button.modal__close", timeout=3000)
+        # Используем 'domcontentloaded' для мгновенного старта
+        await page.goto("https://www.dtek-krem.com.ua/ua/shutdowns", 
+                        wait_until="domcontentloaded", 
+                        timeout=30000)
+        
+        # Модальное окно может не появиться без CSS, но проверим быстро
+        try: await page.click("button.modal__close", timeout=500)
         except: pass
 
+        # Ввод данных без лишних пауз
         for sel, val, lid in [
             ("input[name='city']", CITY, "city"),
             ("input[name='street']", STREET, "street"),
             ("input#house_num", HOUSE, "house_num"),
         ]:
             field = page.locator(sel).first
-            await field.wait_for(state="visible", timeout=15000)
+            await field.wait_for(state="attached", timeout=5000) # Ждем только появления в коде
             await field.fill(val)
-            await asyncio.sleep(0.5)
+            
+            # Быстрый клик по автозаполнению
             try:
-                await page.wait_for_selector(f"#{lid}autocomplete-list div", timeout=3000)
-                await page.locator(f"#{lid}autocomplete-list div").first.click()
+                # Ждем появления первого элемента списка
+                item = page.locator(f"#{lid}autocomplete-list div").first
+                await item.wait_for(state="attached", timeout=2000)
+                await item.click()
             except:
                 await page.keyboard.press("ArrowDown")
                 await page.keyboard.press("Enter")
 
-        await page.wait_for_selector("#discon-fact", timeout=20000)
+        # Ждем только сам блок графика
+        await page.wait_for_selector("#discon-fact", timeout=10000)
         
-        # Обновляем время успешной перезагрузки
         last_full_reload = datetime.now()
-        logging.info(f"✅ Страница обновлена в {last_full_reload.strftime('%H:%M:%S')}")
+        logging.info(f"✅ Готово за {(datetime.now() - last_full_reload).total_seconds()} сек")
     except Exception as e:
-        logging.error(f"❌ Ошибка при перезагрузке: {e}")
-
+        logging.error(f"❌ Ошибка быстрой загрузки: {e}")
 # =============================
 # 📊 Получение всех вкладок (с проверкой 5 минут)
 # =============================
