@@ -135,7 +135,6 @@ async def fetch_data(p, lock, force=False):
             for i in range(count):
                 tab = tabs.nth(i)
                 await tab.click(timeout=5000)
-                await asyncio.sleep(0.3)
                 data = await p.evaluate(analysis_script)
                 if data and data.get("dateId"):
                     result[data["dateId"]] = data
@@ -146,25 +145,72 @@ async def fetch_data(p, lock, force=False):
 # =============================
 # ⏳ Расчет времени (Остается без изменений)
 # =============================
-def calculate_time_left(raw_statuses):
-    if not raw_statuses: return "Нет данных."
+def calculate_time_left(schedules):
+    """
+    Принимает словарь всех графиков. 
+    Склеивает сегодня и завтра для расчета переходов через 00:00.
+    """
+    if not schedules:
+        return "Нет данных для расчета."
+
     tz = pytz.timezone('Europe/Kiev')
     now = datetime.now(tz)
-    m_now = now.hour * 60 + now.minute
-    idx = m_now // 30
-    if idx >= 48: return "День окончен."
-    curr = raw_statuses[idx]
-    target_idx = -1
-    for i in range(idx + 1, 48):
-        if raw_statuses[i] != curr:
-            target_idx = i
-            break
-    if target_idx == -1: return f"Сейчас {curr}. До 00:00 без изменений."
-    diff = (target_idx * 30) - m_now
-    h, m = diff // 60, diff % 60
-    act = "включат" if curr == "🔴" else "выключат"
-    return f"Сейчас: {curr}\nЧерез <b>{h}ч. {m}м.</b> свет {act}."
+    
+    # Сортируем ключи (rel), чтобы точно знать где сегодня, а где завтра
+    sorted_rels = sorted(schedules.keys())
+    today_rel = sorted_rels[0]
+    
+    # Берем статусы за сегодня
+    raw_today = schedules[today_rel].get('raw_statuses', [])
+    if not raw_today:
+        return "График на сегодня пуст."
 
+    # Пытаемся взять завтрашний день, если он есть
+    raw_tomorrow = []
+    if len(sorted_rels) > 1:
+        tomorrow_rel = sorted_rels[1]
+        raw_tomorrow = schedules[tomorrow_rel].get('raw_statuses', [])
+
+    # Склеиваем: сегодня (48) + завтра (48) = 96 интервалов
+    full_timeline = raw_today + raw_tomorrow
+    
+    # Текущий индекс в этой длинной ленте
+    minutes_now = now.hour * 60 + now.minute
+    current_idx = minutes_now // 30
+    
+    if current_idx >= len(raw_today):
+        return "Сегодняшний график уже не актуален."
+
+    current_state = full_timeline[current_idx]
+    
+    # Ищем индекс смены статуса в общей ленте
+    change_idx = -1
+    for i in range(current_idx + 1, len(full_timeline)):
+        if full_timeline[i] != current_state:
+            change_idx = i
+            break
+            
+    if change_idx == -1:
+        return f"Сейчас {current_state}. В ближайшие сутки изменений не планируется."
+
+    # Считаем разницу в минутах
+    # change_idx * 30 — это сколько минут от начала ПЕРВОГО дня до момента смены
+    diff_minutes = (change_idx * 30) - minutes_now
+    
+    hours = diff_minutes // 60
+    minutes = diff_minutes % 60
+    
+    action = "включат" if current_state == "🔴" else "выключат"
+    
+    # Формируем текст
+    time_str = f"<b>{hours} ч. {minutes} мин.</b>" if hours > 0 else f"<b>{minutes} мин.</b>"
+    
+    # Добавляем пометку, если включение уже в следующем дне
+    next_day_note = ""
+    if change_idx >= 48:
+        next_day_note = " (уже завтра)"
+
+    return f"Сейчас: {current_state}\nЧерез {time_str} свет {action}{next_day_note}."
 # =============================
 # 📡 Мониторинг (КД 60 сек)
 # =============================
@@ -196,11 +242,15 @@ async def monitoring_task():
                 redis.set(cache_key, data["schedule"], ex=172800)
 
             if changed:
+                today_rel = sorted(schedules.keys())[0]
+                data = schedules[today_rel]
+                ans = calculate_time_left(data.get('raw_statuses', []))
+
                 msg = "🔔 <b>ГРАФИК ИЗМЕНИЛСЯ!</b>\n\n"
-                for rel in sorted(schedules.keys()):
-                    d = schedules[rel]
-                    msg += f"⚡ <b>{d['dateText']}</b>\n{d['schedule']}\n\n"
-                msg += f"🕒 <i>Обновлено: {list(schedules.values())[0]['updateTime']}</i>"
+                for rel in changed:
+                    dt = datetime.fromtimestamp(int(rel))
+                    msg += f"📅 <b>{dt.strftime('%d.%m.%Y')}</b>\n{schedules[rel]['schedule']}\n\n"
+                    msg += f"🕒 <i>Обновлено: {list(schedules.values())[0]['updateTime']}</i>n\n{ans}"
                 try: await bot.send_message(int(uid), msg, parse_mode="HTML")
                 except: pass
 
